@@ -18,7 +18,7 @@ import time
 # This will be particular to your local ~/.bitcoin/bitcoin.conf
 
 ### Edit me! v
-RPC_URL     = "http://127.0.0.1:8332"
+RPC_URL     = "http://127.0.0.1:10889"
 RPC_USER    = "bitcoinrpc"
 RPC_PASS    = ""
 ### Edit me! ^
@@ -59,11 +59,15 @@ def rpc_submitblock(block_submission):
     try: return rpc("submitblock", [block_submission])
     except ValueError: return {}
 
-# For unittest purposes:
-
 def rpc_getblock(block_id):
     try: return rpc("getblock", [block_id])
     except ValueError: return {}
+
+def rpc_getblockhash(block_num):
+    try: return rpc("getblockhash", [block_num])
+    except ValueError: return {}
+
+# For unittest purposes:
 
 def rpc_getrawtransaction(transaction_id):
     try: return rpc("getrawtransaction", [transaction_id])
@@ -241,6 +245,57 @@ def block_form_header(block):
 def block_compute_raw_hash(header):
     return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1]
 
+def hashhistoricblockdata(bin_hash,int_blockheight):
+    """
+    Hash random historic blockchain data based on an input hash.
+    bin_hash: binary hash
+    int_blockheight: current blockheight
+    """
+    # Constants:
+    # BLOCK_RANGE_DEPTH is how many blocks to use as a range of possible
+    # historic blocks. To allow pruned nodes to validate a block it may be
+    # desireable to use a short depth as many deep blocks would not be
+    # available. Currently the full chain is used.
+    # TODO: determine a depth, maybe 10000 for the last 10000 blocks?
+    BLOCK_RANGE_DEPTH = int_blockheight
+
+    ### Determine the target block based on the input hash
+    # Use the string representation of the input hash:
+    str_hash_in = str(bin2hex(bin_hash))
+    # determine a range value for the block based on the trailing value of the 
+    # input hash:
+    float_rangeval_blk = float(int(str_hash_in[-8:],16))/float(int('ffffffff',16))
+    # determine a range value for the transaction based on the leading value 
+    # of the input hash:
+    float_rangeval_tx = float(int(str_hash_in[:8],16))/float(int('ffffffff',16))
+    # The block in the chain we will pull data from:
+    int_datablk = int_blockheight - int(round(float_rangeval_blk*BLOCK_RANGE_DEPTH))
+
+    ### Pull the required information from the blockchain:
+    # The hash of the target block: 
+    str_datablk_hash = rpc_getblockhash(int_datablk)
+    # Get the full block info:
+    blk_datablk = rpc_getblock(str_datablk_hash)
+    # The merkleroot of the target block: 
+    str_datablk_merkleroot = blk_datablk['merkleroot']
+    # Number of transactions in the block:
+    int_datablk_numtx = len(blk_datablk['tx'])
+    # Pick the index of the transaction from the tx range value:
+    int_datablk_targettx = int(float_rangeval_tx*float(int_datablk_numtx)) + 1
+    # The target transaction hash from the target block:
+    str_datablk_targettx_hash = blk_datablk['tx'][int_datablk_targettx - 1]
+    
+    ### Hash the historic data
+    # Concatinate the hashes and hash them:
+    h = hashlib.sha256(
+        str_hash_in +
+        str_datablk_hash + 
+        str_datablk_merkleroot + 
+        str_datablk_targettx_hash
+        ).digest()
+
+    return h
+
 # Convert block bits to target
 #
 # Arguments:
@@ -356,6 +411,10 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
             block_header = block_header[0:76] + chr(nonce & 0xff) + chr((nonce >> 8) & 0xff) + chr((nonce >> 16) & 0xff) + chr((nonce >> 24) & 0xff)
             # Recompute the block hash
             block_hash = block_compute_raw_hash(block_header)
+            # Hash historical block data to prove access to the blockchain:
+            int_chainlength = block_template['height']-1
+            for i in range(16):
+                block_hash = hashhistoricblockdata(block_hash,int_chainlength)
 
             # Check if it the block meets the target target hash
             if block_check_target(block_hash, target_hash):
@@ -365,9 +424,9 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
                 return (block_template, hps_average)
 
             # Lightweight benchmarking of hashes / sec and timeout check
-            if nonce > 0 and nonce % 1000000 == 0:
+            if nonce > 0 and nonce % 10 == 0:
                 time_elapsed = time.clock() - time_stamp
-                hps_list.append(1000000.0 / time_elapsed)
+                hps_list.append(10.0 / time_elapsed)
                 time_stamp = time.clock()
 
                 # If our mine time expired, return none
@@ -389,8 +448,8 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 def standalone_miner(coinbase_message, address):
     while True:
         print "Mining new block template..."
-        mined_block, hps = block_mine(rpc_getblocktemplate(), coinbase_message, 0, address, timeout=60)
-        print "Average Mhash/s: %.4f\n" % (hps / 1000000.0)
+        mined_block, hps = block_mine(rpc_getblocktemplate(), coinbase_message, 0, address, timeout=5)
+        print "Average khash/s: %.4f\n" % (hps / 1000.0)
 
         if mined_block != None:
             print "Solved a block! Block hash:", mined_block['hash']
